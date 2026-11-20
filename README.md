@@ -6,14 +6,28 @@ He sits in a transparent, always-on-top window, so clicks go straight through to
 
 ## Run it
 
-macOS only. You need Apple's command line tools (`xcode-select --install`).
+### Windows
+
+You need [Node.js](https://nodejs.org). Then double-click `run-windows.bat`, or from a terminal:
+
+```bash
+cd electron
+npm install
+npm start
+```
+
+A 🤠 hat shows up in the system tray (it may be hidden under the `^` arrow). Right-click it to quit.
+
+### macOS
+
+You need Apple's command line tools (`xcode-select --install`).
 
 ```bash
 sh build.sh
 open WhipGuy.app
 ```
 
-A 🤠 shows up in the menu bar. Quit from there.
+A 🤠 shows up in the menu bar. Quit from there. The Electron version above also runs on macOS and Linux if you'd rather use that.
 
 ## What he does
 
@@ -21,7 +35,7 @@ He walks around, stops, cracks the whip, and yells things like "Compile faster!"
 
 - **Drag** him anywhere.
 - **Click** him to poke him.
-- **Right-click** him (or click 🤠 in the menu bar) for the menu:
+- **Right-click** him (or use the 🤠 in the menu bar / system tray) for the menu:
   - **MEGA ULTRA GIGA WHIP CRACK**: your screen shatters like glass.
   - **Call reinforcements**: five more whip guys show up for about 30 seconds.
   - **Request air strike**: bombers fly over and blow up your desktop.
@@ -31,7 +45,8 @@ He walks around, stops, cracks the whip, and yells things like "Compile faster!"
 ## How it works
 
 - `main.swift`: a borderless, click-through `NSPanel` covering the screen, with a transparent `WKWebView` inside. Every 25ms it checks whether the mouse is over the whip guy, and only then lets clicks land on the overlay. The right-click menu is a native `NSMenu`.
-- `web/index.html`: the whole show, drawn on one canvas: walking, whipping, speech bubbles, glass cracks, planes, bombs, explosions and the duel.
+- `electron/`: the same overlay for Windows and Linux. A transparent, frameless, always-on-top window that ignores the mouse except over the whip guy, plus a tray menu.
+- `web/index.html`: the whole show, shared by both versions, drawn on one canvas: walking, whipping, speech bubbles, glass cracks, planes, bombs, explosions and the duel.
 - `web/img/`: three AI-generated frames (resting, winding up, cracking).
 - `web/sfx/`: the sounds, made with a few lines of numpy. No recordings.
 

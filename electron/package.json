@@ -1,0 +1,13 @@
+{
+  "name": "whip-guy",
+  "version": "0.1.0",
+  "description": "A grumpy stick cowboy that lives on your screen and whips Claude when it's too slow.",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.4.11"
+  }
+}

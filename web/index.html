@@ -16,7 +16,8 @@
 <div id="help">Preview keys: 1 mega crack · 2 reinforcements · 3 air strike · 4 duel · right-click or drag the guy</div>
 <script>
 'use strict'
-const native = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.whip
+// macOS app: WKWebView handler. Windows/Linux: the Electron preload bridge.
+const native = (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.whip) || window.whipNative
 const post = m => { if (native) native.postMessage(m) }
 if (!native) document.body.classList.add('preview')
 
