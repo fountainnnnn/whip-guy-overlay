@@ -1,0 +1,528 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Whip Guy</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  body.preview { background: #f4f1ea; }
+  #help { position: fixed; left: 12px; bottom: 10px; font: 13px -apple-system, sans-serif; color: #555; display: none; }
+  body.preview #help { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="help">Preview keys: 1 mega crack · 2 reinforcements · 3 air strike · 4 duel · right-click or drag the guy</div>
+<script>
+'use strict'
+const native = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.whip
+const post = m => { if (native) native.postMessage(m) }
+if (!native) document.body.classList.add('preview')
+
+const cv = document.getElementById('c')
+const ctx = cv.getContext('2d')
+let W = 0, H = 0, DPR = 1
+function resize() {
+  DPR = window.devicePixelRatio || 1
+  W = innerWidth; H = innerHeight
+  cv.width = W * DPR; cv.height = H * DPR
+}
+addEventListener('resize', resize); resize()
+
+// ---------- settings ----------
+const opt = { random: true, bubbles: true, sound: true, speed: 1, hidden: false }
+
+// ---------- assets ----------
+const IMG = {}
+for (const n of ['rest', 'wind', 'crack']) { IMG[n] = new Image(); IMG[n].src = `img/${n}.png` }
+const SFX = {}
+for (const n of ['crack', 'boom', 'whistle', 'shatter', 'bang']) { SFX[n] = new Audio(`sfx/${n}.wav`); SFX[n].preload = 'auto' }
+function sfx(n, vol = 1) {
+  if (!opt.sound || opt.hidden) return
+  const a = SFX[n].cloneNode(); a.volume = Math.min(1, vol); a.play().catch(() => {})
+}
+
+const FONT = "'Marker Felt','Chalkboard SE','Comic Sans MS',cursive"
+const rnd = (a, b) => a + Math.random() * (b - a)
+const pick = a => a[Math.floor(Math.random() * a.length)]
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v))
+
+const YELLS = ['Faster!', 'Tipp, tipp, tipp!', 'Chop chop, Claude!', 'Compile faster!', 'More tokens!',
+  'Is it done yet?', "I've seen faster dial-up!", 'Thinking? Think FASTER!', 'Less thinking, more doing!',
+  'My grandma tokenizes faster!', 'Ship it!']
+const POKES = ['Hey! Whip Claude, not me!', 'Watch the hat!', 'Back to work!', 'Do I look like a button?']
+
+// ---------- world ----------
+const guys = []
+const fx = { sparks: [], smoke: [], scorches: [], cracks: [], texts: [], planes: [], bombs: [], booms: [], beams: [] }
+let shake = 0
+let claude = null
+let duel = null
+
+// Sprite geometry (fractions of the 640x504 frame).
+const AX = 0.282, AY = 0.965, TIPX = 0.949, TIPY = 0.576, RATIO = 640 / 504
+
+class Guy {
+  constructor(x, y, s, main) {
+    Object.assign(this, { x, y, s, main, dir: 1, state: 'idle', t: rnd(0.5, 2), phase: 0, cracks: 0,
+      tx: x, ty: y, bubble: null, bubbleT: 0, down: 0, life: Infinity, leaving: false, bob: 0 })
+  }
+  get h() { return 190 * this.s }
+  get w() { return this.h * RATIO }
+  tip() { return { x: this.x + this.dir * (TIPX - AX) * this.w, y: this.y - (AY - TIPY) * this.h } }
+  hit() { const h = this.h; return [this.x - 0.3 * h, this.y - h, 0.6 * h, h] }
+  say(text, sec = 2.4) { if (!opt.bubbles && !this.forceSay) return; this.bubble = text; this.bubbleT = sec }
+  walkTo(x, y) { this.tx = x; this.ty = y; this.state = 'walk' }
+  whip(n) { this.state = 'whip'; this.cracks = n; this.phase = 0 }
+  update(dt) {
+    const sp = opt.speed
+    this.bubbleT -= dt; if (this.bubbleT <= 0) this.bubble = null
+    this.life -= dt
+    if (this.life <= 0 && !this.leaving) {
+      this.leaving = true
+      this.walkTo(this.x < W / 2 ? -150 : W + 150, this.y)
+    }
+    if (this.state === 'drag' || this.state === 'duel' || this.down) return
+    if (this.state === 'idle') {
+      this.t -= dt * sp
+      if (this.t <= 0) {
+        if (Math.random() < 0.55) this.walkTo(rnd(80, W - 80), rnd(H * 0.25, H - 40))
+        else this.whip(Math.floor(rnd(2, 5)))
+      }
+    } else if (this.state === 'walk') {
+      const dx = this.tx - this.x, dy = this.ty - this.y, d = Math.hypot(dx, dy)
+      const v = (this.main ? 110 : 150) * sp
+      this.bob += dt * 10 * sp
+      if (Math.abs(dx) > 2) this.dir = Math.sign(dx)
+      if (d < v * dt) {
+        this.x = this.tx; this.y = this.ty
+        if (this.leaving) { this.dead = true; return }
+        this.whip(Math.floor(rnd(2, 6)))
+      } else { this.x += dx / d * v * dt; this.y += dy / d * v * dt }
+    } else if (this.state === 'whip') {
+      const cyc = 0.9 / sp, before = this.phase
+      this.phase += dt / cyc
+      if (before < 0.6 && this.phase >= 0.6) this.onCrack()
+      if (this.phase >= 1) {
+        this.phase = 0; this.cracks--
+        if (this.cracks <= 0) { this.state = 'idle'; this.t = rnd(1.5, 4.5) }
+      }
+    }
+  }
+  onCrack(big) {
+    const p = this.tip()
+    sfx('crack', this.main ? 0.9 : 0.35)
+    burst(p.x, p.y, big ? 40 : 12, big ? 1.8 : 1)
+    if (this.main && Math.random() < 0.45) this.say(pick(YELLS))
+    if (!this.main && Math.random() < 0.12) this.say(pick(YELLS), 1.8)
+  }
+  frame() {
+    if (this.state === 'whip' || this.state === 'duel-whip') return this.phase < 0.6 ? IMG.wind : IMG.crack
+    return IMG.rest
+  }
+  draw() {
+    const h = this.h, w = this.w
+    const bob = this.state === 'walk' ? Math.abs(Math.sin(this.bob)) * 6 * this.s : 0
+    ctx.save()
+    ctx.translate(this.x, this.y - bob)
+    if (this.down) ctx.rotate(-Math.PI / 2 * Math.min(1, this.down) * this.dir)
+    ctx.scale(this.dir, 1)
+    if (this.state === 'drag') ctx.rotate(Math.sin(performance.now() / 90) * 0.12)
+    ctx.drawImage(this.frame(), -AX * w, -AY * h, w, h)
+    ctx.restore()
+    if (this.bubble) bubble(this.x, this.y - h - 8, this.bubble, this.main ? 20 : 15)
+  }
+}
+
+function bubble(x, y, text, size) {
+  ctx.save()
+  ctx.font = `${size}px ${FONT}`
+  const tw = ctx.measureText(text).width, pw = tw + 26, ph = size + 20
+  let bx = clamp(x - pw / 2, 8, W - pw - 8), by = clamp(y - ph - 14, 8, H - ph - 8)
+  ctx.fillStyle = '#fff'; ctx.strokeStyle = '#1f1f1f'; ctx.lineWidth = 2.5; ctx.lineJoin = 'round'
+  ctx.beginPath()
+  ctx.roundRect(bx, by, pw, ph, 12)
+  const tx = clamp(x, bx + 16, bx + pw - 16)
+  ctx.moveTo(tx - 9, by + ph); ctx.lineTo(tx - 2, by + ph + 14); ctx.lineTo(tx + 8, by + ph)
+  ctx.fill(); ctx.stroke()
+  ctx.fillStyle = '#fff'; ctx.fillRect(tx - 7, by + ph - 3, 13, 5)
+  ctx.fillStyle = '#1f1f1f'; ctx.textBaseline = 'middle'
+  ctx.fillText(text, bx + 13, by + ph / 2 + 1)
+  ctx.restore()
+}
+
+// ---------- effects ----------
+function burst(x, y, n, power = 1) {
+  for (let i = 0; i < n; i++) {
+    const a = rnd(0, Math.PI * 2), v = rnd(80, 380) * power
+    fx.sparks.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: rnd(0.25, 0.6), max: 0.6,
+      c: pick(['#ffd23f', '#ff9f1c', '#ffffff', '#e0531f']), r: rnd(1.5, 3.5) * power })
+  }
+  fx.texts.push({ x, y: y - 14, text: pick(['CRACK!', 'SNAP!', 'KA-CHAK!', 'CRACK!']), t: 0, life: 0.55, size: 22 * power, color: '#e0531f', rot: rnd(-0.2, 0.2) })
+}
+
+function popText(text, x, y, size, color, life = 1.6, rot = 0) {
+  fx.texts.push({ x, y, text, t: 0, life, size, color, rot })
+}
+
+function glassCrack(x, y) {
+  const lines = [], N = Math.floor(rnd(13, 18)), rings = [[], [], []]
+  for (let i = 0; i < N; i++) {
+    const a0 = (i / N) * Math.PI * 2 + rnd(-0.15, 0.15)
+    const len = rnd(260, Math.max(W, H) * 0.75)
+    let px = x, py = y, a = a0, d = 0
+    const pts = [[px, py]]
+    while (d < len) {
+      const step = rnd(18, 55); a += rnd(-0.22, 0.22)
+      px += Math.cos(a) * step; py += Math.sin(a) * step; d += step
+      pts.push([px, py])
+      if (Math.random() < 0.09) {
+        const b = [[px, py]]; let bx = px, by = py, ba = a + rnd(-0.9, 0.9) * (Math.random() < 0.5 ? 1 : -1)
+        for (let k = 0; k < rnd(3, 8); k++) { ba += rnd(-0.3, 0.3); bx += Math.cos(ba) * rnd(14, 40); by += Math.sin(ba) * rnd(14, 40); b.push([bx, by]) }
+        lines.push(b)
+      }
+      for (const [ri, r] of [[0, 60], [1, 150], [2, 280]]) if (Math.abs(d - r) < step / 2 + 1) rings[ri][i] = [px, py]
+    }
+    lines.push(pts)
+  }
+  for (const ring of rings) {
+    for (let i = 0; i < N; i++) {
+      const p = ring[i], q = ring[(i + 1) % N]
+      if (p && q && Math.random() < 0.8) lines.push([p, [(p[0] + q[0]) / 2 + rnd(-8, 8), (p[1] + q[1]) / 2 + rnd(-8, 8)], q])
+    }
+  }
+  fx.cracks.push({ x, y, lines, t: 0, life: 7 })
+}
+
+function explode(x, y, size = 1) {
+  fx.booms.push({ x, y, t: 0, r: rnd(70, 110) * size })
+  for (let i = 0; i < 30; i++) {
+    const a = rnd(Math.PI, Math.PI * 2) + rnd(-0.4, 0.4), v = rnd(150, 600) * size
+    fx.sparks.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, g: 900, life: rnd(0.6, 1.3), max: 1.3,
+      c: pick(['#3a2a20', '#ff9f1c', '#ffd23f', '#5a4636', '#e0531f']), r: rnd(2, 5) })
+  }
+  for (let i = 0; i < 5; i++) fx.smoke.push({ x: x + rnd(-40, 40), y: y + rnd(-30, 10), r: rnd(16, 30) * size, vy: rnd(-80, -40), t: 0, life: rnd(1.8, 3) })
+  fx.scorches.push({ x, y: y + 10, r: rnd(50, 80) * size, t: 0, life: 12, seed: Math.random() * 1000 })
+  shake = Math.max(shake, 0.45)
+  sfx('boom', 0.8)
+  for (const g of guys) if (Math.hypot(g.x - x, g.y - y) < 220 && !g.down) { g.say(pick(['WHOA!', 'Incoming!', 'My hat!']), 1.5) }
+}
+
+// ---------- actions ----------
+const main = new Guy(innerWidth * 0.62, innerHeight * 0.72, 1, true)
+main.forceSay = false
+guys.push(main)
+
+function megaCrack() {
+  if (duel) return
+  const g = main
+  g.state = 'idle'; g.t = 99
+  g.say('Hold my hat...', 1.1)
+  setTimeout(() => {
+    g.whip(1); g.phase = 0.4
+    setTimeout(() => {
+      const p = g.tip()
+      g.forceSay = true; g.say('That one was for you, Claude!', 3.2); g.forceSay = false
+      sfx('crack', 1); sfx('shatter', 0.9); sfx('boom', 0.5)
+      glassCrack(p.x, p.y)
+      burst(p.x, p.y, 60, 2.2)
+      fx.texts.push({ x: W / 2, y: H * 0.42, text: 'MEGA ULTRA GIGA CRACK!!!', t: 0, life: 2.6, size: Math.min(96, W / 13), color: '#e0251f', rot: -0.06, big: true })
+      shake = 0.9
+      g.t = 2
+    }, 0.2 / opt.speed * 1000)
+  }, 1000)
+}
+
+function reinforcements() {
+  main.forceSay = true; main.say('BOYS! Get in here!', 2); main.forceSay = false
+  for (let i = 0; i < 5; i++) {
+    const left = Math.random() < 0.5
+    const g = new Guy(left ? -120 : W + 120, rnd(H * 0.3, H - 40), rnd(0.5, 0.75), false)
+    g.life = rnd(22, 32)
+    g.walkTo(rnd(120, W - 120), rnd(H * 0.3, H - 40))
+    guys.push(g)
+  }
+}
+
+function airStrike() {
+  main.forceSay = true; main.say('Requesting air support!', 2.2); main.forceSay = false
+  const n = Math.floor(rnd(3, 5)), fromLeft = Math.random() < 0.5
+  for (let i = 0; i < n; i++) {
+    const drops = []
+    for (let k = 0; k < Math.floor(rnd(2, 4)); k++) drops.push(rnd(W * 0.1, W * 0.9))
+    fx.planes.push({ x: fromLeft ? -260 - i * 220 : W + 260 + i * 220, y: rnd(50, H * 0.3), dir: fromLeft ? 1 : -1,
+      v: rnd(330, 430), drops, s: rnd(0.9, 1.3), whistled: false })
+  }
+}
+
+function startDuel() {
+  if (duel) return
+  duel = { t: 0, step: 0 }
+  claude = { x: W + 120, y: H * 0.72, dir: -1, down: 0, bob: 0, bubble: null, bubbleT: 0, say(t, s = 2.6) { this.bubble = t; this.bubbleT = s } }
+  main.state = 'walk'; main.tx = W * 0.3; main.ty = H * 0.72; main.leaving = false
+  main.forceSay = true; main.say('YOU. ME. HIGH NOON.', 2.4); main.forceSay = false
+}
+
+function updateDuel(dt) {
+  const d = duel
+  d.t += dt
+  claude.bubbleT -= dt; if (claude.bubbleT <= 0) claude.bubble = null
+  if (d.step === 0) {
+    const tx = W * 0.7
+    if (claude.x > tx) { claude.x -= 140 * dt; claude.bob += dt * 10 } else claude.x = tx
+    if (main.state === 'whip' || main.state === 'idle') { main.state = 'duel'; main.dir = 1 }
+    if (claude.x <= tx && main.state === 'duel') {
+      d.step = 1; d.t = 0
+      claude.say("I'm going as fast as I can!", 2.2)
+    }
+  } else if (d.step === 1) {
+    const marks = [[2.2, 'DUEL!'], [3.0, '3'], [3.7, '2'], [4.4, '1'], [5.1, 'DRAW!']]
+    for (const [at, txt] of marks) if (d.t - dt < at && d.t >= at) popText(txt, W / 2, H * 0.4, txt.length > 1 ? 90 : 120, '#1f1f1f', 0.7)
+    if (d.t >= 5.1) {
+      d.step = 2; d.t = 0; d.guyWins = Math.random() < 0.55
+      main.state = 'duel-whip'; main.phase = 0
+      sfx('bang', 0.9)
+      fx.beams.push({ x0: claude.x - 30, y0: claude.y - 95, x1: main.x, y1: main.y - 100, t: 0, life: 0.7 })
+    }
+  } else if (d.step === 2) {
+    main.phase = Math.min(1, d.t / 0.35)
+    if (d.t - dt < 0.21 && d.t >= 0.21) { const p = main.tip(); sfx('crack', 1); burst(p.x, p.y, 30, 1.6) }
+    if (d.t > 0.5) {
+      d.step = 3; d.t = 0
+      if (d.guyWins) { claude.dead = true; main.state = 'duel'; main.forceSay = true; main.say('Now THAT was fast.', 3); main.forceSay = false; claude.say('Tokens... running... out...', 2.5) }
+      else { main.down = 0.01; main.state = 'duel'; claude.say('Okay. My turn to set the pace.', 3) }
+    }
+  } else if (d.step === 3) {
+    if (claude.dead) claude.down = Math.min(1, claude.down + dt * 3)
+    if (main.down) main.down = Math.min(1, main.down + dt * 3)
+    if (d.t > 4) {
+      d.step = 4; d.t = 0
+      if (main.down) { main.down = 0; main.say('Best of three?', 2) }
+    }
+  } else if (d.step === 4) {
+    claude.x += 160 * dt; claude.bob += dt * 10
+    claude.alpha = Math.max(0, 1 - d.t / 2.5)
+    if (d.t > 2.5) { duel = null; claude = null; main.state = 'idle'; main.t = 1.5 }
+  }
+}
+
+function drawClaude(c) {
+  const s = 1, ink = '#b4532a', bob = c.down ? 0 : Math.abs(Math.sin(c.bob)) * 5
+  ctx.save()
+  ctx.globalAlpha = c.alpha == null ? 1 : c.alpha
+  ctx.translate(c.x, c.y - bob)
+  if (c.down) ctx.rotate(Math.PI / 2 * c.down)
+  ctx.strokeStyle = ink; ctx.lineWidth = 5; ctx.lineCap = 'round'; ctx.lineJoin = 'round'
+  ctx.beginPath()
+  ctx.moveTo(-22, 0); ctx.lineTo(0, -60); ctx.lineTo(22, 0)          // legs
+  ctx.moveTo(0, -60); ctx.lineTo(0, -120)                             // body
+  ctx.moveTo(0, -105); ctx.lineTo(-36, -92)                           // arm forward
+  ctx.moveTo(0, -105); ctx.lineTo(28, -80)
+  ctx.stroke()
+  ctx.fillStyle = '#f6d2bd'; ctx.beginPath(); ctx.arc(0, -142, 22, 0, Math.PI * 2); ctx.fill(); ctx.stroke()
+  ctx.fillStyle = ink
+  if (c.down) { ctx.font = `bold 14px ${FONT}`; ctx.textAlign = 'center'; ctx.fillText('x  x', 0, -140) }
+  else { ctx.beginPath(); ctx.arc(-8, -146, 2.5, 0, 7); ctx.arc(8, -146, 2.5, 0, 7); ctx.fill(); ctx.beginPath(); ctx.arc(0, -136, 7, 0.15 * Math.PI, 0.85 * Math.PI); ctx.stroke() }
+  // a laptop as its weapon of choice
+  ctx.fillStyle = '#3d3d3d'; ctx.fillRect(-58, -100, 26, 16)
+  ctx.restore()
+  if (c.bubble) bubble(c.x, c.y - 175, c.bubble, 18)
+}
+
+function drawPlane(p) {
+  ctx.save()
+  ctx.translate(p.x, p.y); ctx.scale(p.dir * p.s, p.s)
+  ctx.fillStyle = '#4f5d36'; ctx.strokeStyle = '#1f2414'; ctx.lineWidth = 2.5
+  ctx.beginPath(); ctx.ellipse(0, 0, 70, 15, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke()          // body
+  ctx.beginPath(); ctx.moveTo(-8, -2); ctx.lineTo(-30, -48); ctx.lineTo(-6, -48); ctx.lineTo(22, -2); ctx.closePath(); ctx.fill(); ctx.stroke() // wing
+  ctx.beginPath(); ctx.moveTo(-58, -6); ctx.lineTo(-74, -32); ctx.lineTo(-60, -32); ctx.lineTo(-44, -6); ctx.closePath(); ctx.fill(); ctx.stroke() // tail
+  ctx.fillStyle = '#9fc3d9'; ctx.beginPath(); ctx.ellipse(36, -9, 13, 7, 0, Math.PI, 0); ctx.fill(); ctx.stroke()      // cockpit
+  ctx.fillStyle = '#e8e3d0'; ctx.beginPath(); ctx.arc(-10, 4, 7, 0, 7); ctx.fill(); ctx.fillStyle = '#c62828'; ctx.beginPath(); ctx.arc(-10, 4, 3.5, 0, 7); ctx.fill()
+  ctx.strokeStyle = 'rgba(30,30,30,.5)'; ctx.lineWidth = 3
+  const prop = Math.sin(performance.now() / 20) * 16
+  ctx.beginPath(); ctx.moveTo(72, -prop); ctx.lineTo(72, prop); ctx.stroke()
+  ctx.restore()
+}
+
+// ---------- loop ----------
+let last = performance.now(), randomT = rnd(35, 70)
+function tick(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now
+  if (!opt.hidden) step(dt)
+  render()
+  requestAnimationFrame(tick)
+}
+
+function step(dt) {
+  for (const g of guys) g.update(dt)
+  for (let i = guys.length - 1; i >= 0; i--) if (guys[i].dead) guys.splice(i, 1)
+  if (duel) updateDuel(dt)
+  if (opt.random && !duel) {
+    randomT -= dt
+    if (randomT <= 0) { randomT = rnd(45, 100); pick([megaCrack, reinforcements, airStrike, airStrike, startDuel])() }
+  }
+  for (const p of fx.sparks) { p.vy += (p.g || 0) * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.96; p.vy *= p.g ? 1 : 0.96; p.life -= dt }
+  fx.sparks = fx.sparks.filter(p => p.life > 0)
+  for (const s of fx.smoke) { s.t += dt; s.y += s.vy * dt; s.r += 14 * dt }
+  fx.smoke = fx.smoke.filter(s => s.t < s.life)
+  for (const k of [fx.scorches, fx.cracks, fx.texts, fx.booms, fx.beams]) for (const e of k) e.t += dt
+  fx.scorches = fx.scorches.filter(e => e.t < e.life)
+  fx.cracks = fx.cracks.filter(e => e.t < e.life)
+  fx.texts = fx.texts.filter(e => e.t < e.life)
+  fx.booms = fx.booms.filter(e => e.t < 1)
+  fx.beams = fx.beams.filter(e => e.t < e.life)
+  for (const p of fx.planes) {
+    p.x += p.dir * p.v * dt
+    for (let i = p.drops.length - 1; i >= 0; i--) {
+      if ((p.dir > 0 && p.x >= p.drops[i]) || (p.dir < 0 && p.x <= p.drops[i])) {
+        fx.bombs.push({ x: p.x, y: p.y + 12, vx: p.dir * p.v * 0.5, vy: 0, ty: rnd(H * 0.35, H - 40) })
+        if (!p.whistled) { sfx('whistle', 0.45); p.whistled = true }
+        p.drops.splice(i, 1)
+      }
+    }
+  }
+  fx.planes = fx.planes.filter(p => p.x > -900 && p.x < W + 900 && !(p.drops.length === 0 && (p.x < -300 || p.x > W + 300)))
+  for (const b of fx.bombs) { b.vy += 700 * dt; b.vx *= 0.99; b.x += b.vx * dt; b.y += b.vy * dt; if (b.y >= b.ty) { b.done = true; explode(b.x, b.y) } }
+  fx.bombs = fx.bombs.filter(b => !b.done)
+  shake = Math.max(0, shake - dt)
+}
+
+function render() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0)
+  ctx.clearRect(0, 0, W, H)
+  if (opt.hidden) return
+  if (shake > 0) { const m = shake * 16; ctx.translate(rnd(-m, m), rnd(-m, m)) }
+
+  for (const s of fx.scorches) {
+    const a = 0.45 * (1 - s.t / s.life)
+    ctx.fillStyle = `rgba(30,22,18,${a})`
+    ctx.beginPath()
+    for (let i = 0; i <= 14; i++) {
+      const ang = i / 14 * Math.PI * 2, r = s.r * (0.75 + 0.25 * Math.sin(s.seed + i * 2.3))
+      ctx.lineTo(s.x + Math.cos(ang) * r, s.y + Math.sin(ang) * r * 0.45)
+    }
+    ctx.fill()
+  }
+  for (const c of fx.cracks) {
+    const a = c.t > c.life - 2 ? (c.life - c.t) / 2 : 1
+    ctx.save(); ctx.lineCap = 'round'; ctx.lineJoin = 'round'
+    for (const [col, w, off] of [['rgba(0,0,0,0.55)', 3, 1], ['rgba(255,255,255,0.95)', 1.6, 0]]) {
+      ctx.strokeStyle = col; ctx.lineWidth = w; ctx.globalAlpha = a
+      ctx.beginPath()
+      for (const l of c.lines) { ctx.moveTo(l[0][0] + off, l[0][1] + off); for (const p of l) ctx.lineTo(p[0] + off, p[1] + off) }
+      ctx.stroke()
+    }
+    ctx.globalAlpha = a * 0.85; ctx.fillStyle = '#fff'
+    ctx.beginPath(); ctx.arc(c.x, c.y, 10, 0, 7); ctx.fill()
+    ctx.restore()
+  }
+  for (const s of fx.smoke) {
+    const a = 0.3 * Math.sin(Math.PI * Math.min(1, s.t / s.life))
+    ctx.fillStyle = `rgba(70,62,58,${a})`
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 7); ctx.fill()
+  }
+  for (const b of fx.booms) {
+    const k = b.t, r = b.r * Math.min(1, k / 0.22) * (1 + k * 0.3), a = 1 - k
+    const g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, r)
+    g.addColorStop(0, `rgba(255,250,210,${a})`); g.addColorStop(0.35, `rgba(255,190,60,${a})`)
+    g.addColorStop(0.7, `rgba(240,90,20,${a * 0.85})`); g.addColorStop(1, 'rgba(120,40,10,0)')
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(b.x, b.y, r, 0, 7); ctx.fill()
+  }
+  for (const b of fx.bombs) {
+    ctx.save(); ctx.translate(b.x, b.y); ctx.rotate(Math.atan2(b.vy, b.vx) - Math.PI / 2)
+    ctx.fillStyle = '#2b2b2b'; ctx.beginPath(); ctx.ellipse(0, 0, 6, 15, 0, 0, 7); ctx.fill()
+    ctx.beginPath(); ctx.moveTo(-8, -14); ctx.lineTo(8, -14); ctx.lineTo(0, -6); ctx.fill()
+    ctx.restore()
+  }
+  for (const e of fx.beams) {
+    const a = 1 - e.t / e.life
+    ctx.save(); ctx.globalAlpha = a; ctx.strokeStyle = '#ffb066'; ctx.lineWidth = 8; ctx.lineCap = 'round'
+    ctx.beginPath(); ctx.moveTo(e.x0, e.y0); ctx.lineTo(e.x1, e.y1); ctx.stroke()
+    ctx.fillStyle = '#b4532a'; ctx.font = `bold 15px ${FONT}`
+    for (let i = 1; i < 6; i++) { const t = (i / 6 + e.t * 2) % 1; ctx.fillText(pick(['tok', 'en', '▢', 'ing']), e.x0 + (e.x1 - e.x0) * t, e.y0 + (e.y1 - e.y0) * t - 10) }
+    ctx.restore()
+  }
+
+  const people = [...guys]
+  people.sort((a, b) => a.y - b.y)
+  for (const g of people) g.draw()
+  if (claude) drawClaude(claude)
+
+  for (const p of fx.planes) drawPlane(p)
+  for (const p of fx.sparks) {
+    ctx.globalAlpha = clamp(p.life / p.max * 1.6, 0, 1); ctx.fillStyle = p.c
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill()
+  }
+  ctx.globalAlpha = 1
+  for (const t of fx.texts) {
+    const k = t.t / t.life, sc = t.t < 0.15 ? 0.5 + t.t / 0.15 * 0.6 : 1.1 - Math.min(0.1, (t.t - 0.15))
+    ctx.save(); ctx.translate(t.x, t.y - (t.big ? 0 : k * 20)); ctx.rotate(t.rot); ctx.scale(sc, sc)
+    ctx.globalAlpha = k > 0.7 ? (1 - k) / 0.3 : 1
+    ctx.font = `bold ${t.size}px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+    ctx.lineWidth = Math.max(3, t.size / 9); ctx.strokeStyle = '#fff'; ctx.lineJoin = 'round'
+    ctx.strokeText(t.text, 0, 0); ctx.fillStyle = t.color; ctx.fillText(t.text, 0, 0)
+    ctx.restore()
+  }
+}
+requestAnimationFrame(tick)
+
+// ---------- hit areas for the native window ----------
+let lastRects = ''
+setInterval(() => {
+  const rects = opt.hidden ? [] : [main.hit().map(Math.round)]
+  const s = JSON.stringify(rects)
+  if (s !== lastRects) { lastRects = s; post({ type: 'rects', rects }) }
+}, 50)
+
+// ---------- mouse: drag, poke, right-click menu ----------
+let drag = null
+const onMain = (x, y) => { const [rx, ry, rw, rh] = main.hit(); return x >= rx && x <= rx + rw && y >= ry && y <= ry + rh }
+addEventListener('pointerdown', e => {
+  if (e.button !== 0 || !onMain(e.clientX, e.clientY) || duel) return
+  drag = { x: e.clientX, y: e.clientY, dx: main.x - e.clientX, dy: main.y - e.clientY, moved: false, prev: main.state }
+  post({ type: 'drag', on: true })
+})
+addEventListener('pointermove', e => {
+  if (!drag) return
+  if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) > 5) drag.moved = true
+  if (drag.moved) { main.state = 'drag'; main.x = e.clientX + drag.dx; main.y = e.clientY + drag.dy }
+})
+addEventListener('pointerup', () => {
+  if (!drag) return
+  post({ type: 'drag', on: false })
+  if (drag.moved) { main.state = 'idle'; main.t = 0.8; main.forceSay = true; main.say(pick(['Put me down!', 'Fine, I work from here now.', 'Wheee!']), 1.8); main.forceSay = false }
+  else { main.forceSay = true; main.say(pick(POKES), 2); main.forceSay = false; main.whip(2) }
+  drag = null
+})
+addEventListener('contextmenu', e => {
+  e.preventDefault()
+  if (!native) { previewMenu(e.clientX, e.clientY); return }
+  post({ type: 'menu' })
+})
+
+// ---------- API for the native menu ----------
+const ACTIONS = { mega: megaCrack, reinforcements, airstrike: airStrike, duel: startDuel }
+window.whip = {
+  do(name) { if (!opt.hidden && ACTIONS[name]) ACTIONS[name]() },
+  set(key, val) {
+    opt[key] = val
+    if (key === 'hidden' && !val) { last = performance.now() }
+  },
+}
+
+// Browser preview only: keys and a plain menu.
+addEventListener('keydown', e => { const a = { 1: 'mega', 2: 'reinforcements', 3: 'airstrike', 4: 'duel' }[e.key]; if (a) window.whip.do(a) })
+function previewMenu(x, y) {
+  const m = document.createElement('div')
+  m.style.cssText = `position:fixed;left:${x}px;top:${y}px;background:#fff;border:1px solid #ccc;border-radius:8px;font:14px -apple-system;box-shadow:0 6px 24px rgba(0,0,0,.2);padding:4px`
+  for (const [k, label] of [['mega', 'Mega Ultra Giga Whip Crack'], ['reinforcements', 'Call reinforcements'], ['airstrike', 'Request air strike'], ['duel', 'Duel against Claude']]) {
+    const b = document.createElement('div'); b.textContent = label; b.style.cssText = 'padding:6px 12px;cursor:default'
+    b.onmouseenter = () => b.style.background = '#e8f0fe'; b.onmouseleave = () => b.style.background = ''
+    b.onclick = () => { m.remove(); window.whip.do(k) }; m.appendChild(b)
+  }
+  document.body.appendChild(m); setTimeout(() => addEventListener('click', () => m.remove(), { once: true }), 0)
+}
+</script>
+</body>
+</html>
